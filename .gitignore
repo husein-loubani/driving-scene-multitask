@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Environments
+.venv/
+venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Tooling caches
+.ruff_cache/
+.pytest_cache/
+.coverage
+
+# Data and weights too large for git: the frames and their annotations (17 GB)
+# are fetched by one call to `download_virtual_kitti()`, and the label maps,
+# predictions and checkpoints are rebuilt by the notebook.
+data/raw/
+data/interim/
+models/
+
+# OS / IDE
+.DS_Store
+.vscode/
+.idea/
