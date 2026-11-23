@@ -1,0 +1,13 @@
+measure,value
+regions,52367.0
+median width (px),19.0
+median height (px),58.0
+median height over width,2.5211267605633805
+share more than 10 times taller than wide,0.04793094888001986
+median share of the box the region fills,0.4393954559103193
+share small (COCO),0.47518475375713715
+share medium (COCO),0.35619760536215556
+share large (COCO),0.16861764088070733
+share cut off by the frame edge,0.13705196020394522
+share with another region within 3 px,0.22139897263543834
+smallest region (pixels),51.0

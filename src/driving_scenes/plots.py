@@ -417,6 +417,71 @@ def plot_threshold_sweep(sweep: pd.DataFrame, chosen: float) -> Figure:
     return figure
 
 
+def plot_reliability(table: pd.DataFrame, error: float) -> Figure:
+    """Hit rate against mean confidence per confidence bin, beside the diagonal of calibration."""
+    figure, axis = plt.subplots(figsize=(6.5, 4.2))
+    axis.plot([0, 1], [0, 1], color="0.5", linewidth=0.8, linestyle=":", label="calibrated")
+    axis.plot(
+        table["mean confidence"],
+        table["hit rate"],
+        marker="o",
+        color=PALETTE["signs"],
+        label="detections",
+    )
+    for _, row in table.iterrows():
+        axis.annotate(
+            f"{row['detections']:,.0f}",
+            (row["mean confidence"], row["hit rate"]),
+            textcoords="offset points",
+            xytext=(4, -10),
+            fontsize=7,
+        )
+    axis.set(
+        xlim=(0, 1),
+        ylim=(0, 1),
+        xlabel="Mean confidence in the bin",
+        ylabel="Share of detections that hit a sign",
+        title=f"Reliability of the detection confidence (ECE {error:.3f})",
+    )
+    axis.legend(loc="upper left")
+    figure.tight_layout()
+    return figure
+
+
+def plot_road_calls(tables: Mapping[str, pd.DataFrame]) -> Figure:
+    """
+    What the false road really is, for each set of frames.
+
+    `tables` maps a frame set's name to its `road_calls_by_class` table. The
+    left panel shows how much of each class is called road, the right panel
+    how much of all false road each class makes up.
+    """
+    figure, axes = plt.subplots(1, 2, figsize=(13, 4.4), sharey=True)
+    first = next(iter(tables.values()))
+    order = first.drop(index="road").sort_values("share called road").index
+    positions = np.arange(len(order))
+    height = 0.8 / len(tables)
+    for index, (name, table) in enumerate(tables.items()):
+        shown = table.loc[order]
+        offset = positions + (index - (len(tables) - 1) / 2) * height
+        for axis, column in zip(axes, ("share called road", "share of false road"), strict=True):
+            axis.barh(offset, shown[column].fillna(0), height=height, label=name)
+    axes[0].set(
+        xlabel="Share of the class's pixels called road",
+        ylabel="True class",
+        title="How much of each class is called road",
+    )
+    axes[1].set(
+        xlabel="Share of all false road",
+        ylabel="True class",
+        title="What the false road is made of",
+    )
+    axes[0].set_yticks(positions, order)
+    axes[1].legend(loc="lower right")
+    figure.tight_layout()
+    return figure
+
+
 def plot_size_scores(table: pd.DataFrame) -> Figure:
     """Recall at the chosen threshold, and AP, for each COCO size class of sign."""
     figure, axes = plt.subplots(1, 2, figsize=(11, 3.6))

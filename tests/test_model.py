@@ -10,10 +10,12 @@ import torch
 from driving_scenes.config import IGNORE_LABEL
 from driving_scenes.modeling import model as model_module
 from driving_scenes.modeling.model import (
+    NETWORK_PARTS,
     ROAD_LOSS,
     SIGN_LOSSES,
     RoadHead,
     build_model,
+    parameter_counts,
     road_loss,
     set_backbone_trainable,
     shared_parameters,
@@ -135,6 +137,21 @@ def test_the_backbone_is_frozen_or_fine_tuned_by_stage():
     assert frozen_share < trainable_share(network) < 1.0
     set_backbone_trainable(network, 5)
     assert trainable_share(network) == 1.0
+
+
+def test_parameter_counts_split_the_network_by_part_and_by_stage():
+    network = build_model(pretrained=False)
+    table = parameter_counts(network, {"stage one": 0, "stage two": 3})
+    assert table.index.tolist() == [*NETWORK_PARTS.values(), "total"]
+    assert table.loc["total", "parameters"] == sum(p.numel() for p in network.parameters())
+    sizes, first, second = (table[column] for column in table)
+    assert first["ResNet layer4"] == first["feature pyramid"] == 0
+    assert first["road head"] == sizes["road head"] and first["box head"] == sizes["box head"]
+    assert second["ResNet layer1"] == second["ResNet stem"] == 0
+    assert second["ResNet layer2"] == sizes["ResNet layer2"]
+    assert second["feature pyramid"] == sizes["feature pyramid"]
+    # The network is left as the last stage set it.
+    assert second["total"] == sum(p.numel() for p in network.parameters() if p.requires_grad)
 
 
 def test_the_adapted_anchors_replace_the_coco_ones_and_resize_the_proposal_outputs():

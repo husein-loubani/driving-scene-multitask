@@ -23,9 +23,10 @@ Two heads read those maps in the same forward pass:
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from functools import partial
 
+import pandas as pd
 import torch
 from torch import nn
 from torch.nn import functional
@@ -53,6 +54,18 @@ from driving_scenes.config import (
 
 SIGN_LOSSES = ("loss_objectness", "loss_rpn_box_reg", "loss_classifier", "loss_box_reg")
 ROAD_LOSS = "loss_road"
+# Parameter name prefixes and the part of the network each belongs to, input to output.
+NETWORK_PARTS = {
+    "detector.backbone.body.conv1": "ResNet stem",
+    "detector.backbone.body.layer1": "ResNet layer1",
+    "detector.backbone.body.layer2": "ResNet layer2",
+    "detector.backbone.body.layer3": "ResNet layer3",
+    "detector.backbone.body.layer4": "ResNet layer4",
+    "detector.backbone.fpn": "feature pyramid",
+    "detector.rpn": "proposal network",
+    "detector.roi_heads": "box head",
+    "road_head": "road head",
+}
 
 
 class RoadHead(nn.Module):
@@ -322,3 +335,28 @@ def trainable_share(model: nn.Module) -> float:
     """Share of the network's weights that receive gradients."""
     counts = [(p.numel(), p.requires_grad) for p in model.parameters()]
     return sum(n for n, trained in counts if trained) / sum(n for n, _ in counts)
+
+
+def part_of(name: str) -> str:
+    """The part of the network a parameter belongs to, from its name."""
+    return next(part for prefix, part in NETWORK_PARTS.items() if name.startswith(f"{prefix}."))
+
+
+def parameter_counts(model: MultiTaskRCNN, stages: Mapping[str, int]) -> pd.DataFrame:
+    """
+    The weights of each part of the network, and how many of them each training stage trains.
+
+    `stages` maps a stage name to the number of ResNet stages it fine-tunes, as
+    `set_backbone_trainable` takes it; the network is left as the last stage
+    sets it. The last row totals the parts.
+    """
+    named = list(model.named_parameters())
+    parts = [part_of(name) for name, _ in named]
+    sizes = pd.Series([parameter.numel() for _, parameter in named])
+    table = pd.DataFrame({"parameters": sizes.groupby(parts, sort=False).sum()})
+    for stage, count in stages.items():
+        set_backbone_trainable(model, count)
+        trained = sizes * [parameter.requires_grad for _, parameter in named]
+        table[f"trained in {stage}"] = trained.groupby(parts, sort=False).sum()
+    table.loc["total"] = table.sum()
+    return table

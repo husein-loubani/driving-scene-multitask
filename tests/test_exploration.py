@@ -10,8 +10,9 @@ from torchvision.models.detection.anchor_utils import AnchorGenerator
 from torchvision.models.detection.image_list import ImageList
 from torchvision.ops import box_iou
 
-from driving_scenes.config import ANCHOR_STRIDES
+from driving_scenes.config import ANCHOR_STRIDES, TALL_ASPECT
 from driving_scenes.exploration import (
+    SIZE_NAMES,
     anchor_coverage,
     anchor_shapes,
     best_anchor_iou,
@@ -22,12 +23,32 @@ from driving_scenes.exploration import (
     coarse_mask_ceilings,
     describe_signs,
     frame_repetition,
+    group_summary,
     has_close_neighbor,
     mask_iou,
     matched_share,
     rendering_agreement,
+    rendering_examples,
+    sign_examples,
+    sign_summary,
+    world_examples,
 )
 from tests.conftest import HEIGHT, ROAD_TOP, WIDTH
+
+
+def test_the_group_summary_counts_moments_frames_signs_and_road(indexed):
+    frames, _, _ = indexed
+    worlds = group_summary(frames, "world")
+    # Three steps in two renderings per world; the steps carry 1, 2 and 0 signs.
+    assert worlds.loc["0001", ["moments", "frames", "renderings"]].tolist() == [3, 6, 2]
+    assert worlds.loc["0001", "share of moments"] == pytest.approx(0.5)
+    assert worlds.loc["0001", "signs per frame"] == pytest.approx(1.0)
+    assert worlds.loc["0001", "frames with a sign"] == pytest.approx(4 / 6)
+    assert worlds.loc["0001", "road share"] == pytest.approx((HEIGHT - ROAD_TOP) / HEIGHT)
+    assert "worlds" not in worlds
+    parts = group_summary(frames.assign(partition="all"), "partition")
+    assert parts.loc["all", "worlds"] == "0001, 0002"
+    assert parts.loc["all", ["moments", "frames"]].tolist() == [6, 12]
 
 
 def test_class_shares_sum_to_one_per_world(indexed):
@@ -188,3 +209,47 @@ def test_a_coarse_box_mask_loses_more_of_the_road_than_a_coarse_grid(tmp_path):
     frames = pd.DataFrame({"frame_id": ["frame"]})
     scores = coarse_mask_ceilings(frames, tmp_path, mask_size=4, stride=2).iloc[0]
     assert scores["semantic head"] > 0.8 > scores["mask head"]
+
+
+def test_the_sign_summary_reads_size_shape_and_flags():
+    described = pd.DataFrame(
+        {
+            "width": [10, 20, 2],
+            "height": [30, 20, 40],
+            "aspect": [3.0, 1.0, 20.0],
+            "fill": [0.5, 1.0, 0.8],
+            "size": pd.Categorical(["small", "medium", "small"], categories=SIZE_NAMES),
+            "at_border": [False, True, False],
+            "fragment": [True, False, False],
+            "pixels": [150, 400, 60],
+        }
+    )
+    summary = sign_summary(described)
+    assert summary["regions"] == 3 and summary["median height over width"] == 3.0
+    assert summary[f"share more than {TALL_ASPECT} times taller than wide"] == pytest.approx(1 / 3)
+    assert summary["share small (COCO)"] == pytest.approx(2 / 3)
+    assert summary["share large (COCO)"] == 0
+    assert summary["share cut off by the frame edge"] == pytest.approx(1 / 3)
+    assert summary["smallest region (pixels)"] == 60
+
+
+def test_sign_examples_pick_one_frame_for_each_question():
+    described = pd.DataFrame(
+        {
+            "frame_id": ["a", "b", "c", "d"],
+            "fragment": [True, False, False, False],
+            "at_border": [False, True, False, False],
+            "pixels": [100, 100, 51, 300],
+            "aspect": [2.0, 1.0, 3.0, 12.0],
+        }
+    )
+    assert sign_examples(described, seed=0)["frame_id"].tolist() == ["a", "b", "c", "d"]
+
+
+def test_examples_take_the_middle_of_each_video_and_every_rendering_of_a_moment(indexed):
+    frames, _, _ = indexed
+    middle = world_examples(frames, "clone")
+    assert middle["world"].tolist() == ["0001", "0002"] and middle["step"].tolist() == [1, 1]
+    assert set(middle["variation"]) == {"clone"}
+    moment = rendering_examples(frames, "0002", 2)
+    assert moment["variation"].tolist() == ["clone", "fog"] and set(moment["step"]) == {2}

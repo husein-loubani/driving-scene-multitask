@@ -91,6 +91,15 @@ CHECKPOINT = "best"
 SETTINGS_NAME = "settings.json"
 PULLS_NAME = "pulls.csv"
 MONITOR = "val_score"
+# The validation scores a run reports, signs first, in the order tables show them.
+VALIDATION_SCORES = (
+    "val_sign_ap50",
+    "val_sign_map",
+    "val_road_iou",
+    "val_road_miou",
+    "val_pixel_accuracy",
+    MONITOR,
+)
 # Lightning's notices that are expected here and say nothing about the result.
 EXPECTED_WARNINGS = (
     # The loaders are rebuilt every epoch to show another rendering of each moment.
@@ -375,6 +384,20 @@ def read_history(run: Path) -> pd.DataFrame:
 def read_pulls(run: Path) -> pd.DataFrame:
     """Each task's measured pull on the shared features, and the weight it carried."""
     return pd.read_csv(run / PULLS_NAME)
+
+
+def best_epoch(run: Path) -> pd.Series:
+    """
+    The validation scores of the epoch a run kept, with the epoch's number and the run's minutes.
+
+    The checkpoint replaces the kept epoch only when a later one scores strictly
+    higher, so the kept epoch is the first with the highest `val_score`.
+    """
+    history = read_history(run)
+    kept = history.loc[history[MONITOR].idxmax()]
+    scores = [name for name in VALIDATION_SCORES if name in kept.index]
+    timing = pd.Series({"epoch": kept["epoch"], "minutes": read_settings(run)["minutes"]})
+    return pd.concat([timing, kept[scores]])
 
 
 def fit(

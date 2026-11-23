@@ -15,6 +15,7 @@ from driving_scenes.modeling import train as train_module
 from driving_scenes.modeling.train import (
     MONITOR,
     TaskBalance,
+    best_epoch,
     fit,
     load_model,
     pull_on,
@@ -159,6 +160,23 @@ def test_a_single_task_run_trains_and_scores_only_its_task(tiny):
     assert history[MONITOR].iloc[0] == pytest.approx(history["val_road_iou"].iloc[0])
     assert read_pulls(run).empty, "one task has nobody to balance against"
     assert load_model(run).tasks == ("road",)
+
+
+def test_the_kept_epoch_is_the_first_with_the_best_validation_score(tmp_path):
+    log = pd.DataFrame(
+        {
+            "epoch": [0, 0, 1, 1, 2, 2],
+            "step": [1, 1, 3, 3, 5, 5],
+            "train_loss": [None, 2.0, None, 1.0, None, 0.5],
+            "val_loss_road": [0.4, None, 0.3, None, 0.2, None],
+            "val_road_iou": [0.5, None, 0.8, None, 0.8, None],
+            MONITOR: [0.5, None, 0.8, None, 0.8, None],
+        }
+    )
+    log.to_csv(tmp_path / "metrics.csv", index=False)
+    (tmp_path / "settings.json").write_text('{"minutes": 12.5}')
+    kept = best_epoch(tmp_path)
+    assert kept.to_dict() == {"epoch": 2, "minutes": 12.5, "val_road_iou": 0.8, MONITOR: 0.8}
 
 
 def test_history_has_one_row_per_epoch(tmp_path):

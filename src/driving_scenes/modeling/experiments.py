@@ -7,6 +7,7 @@ arguments, so a run trained in one is found finished by the other.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import pandas as pd
@@ -20,11 +21,13 @@ from driving_scenes.config import (
     HEAD_LR,
     HELD_OUT,
     PARTITIONS,
+    PREDICTION_DIR,
     RANDOM_SEED,
     TASKS,
     VARIANTS,
 )
-from driving_scenes.dataset import assign_partitions
+from driving_scenes.dataset import assign_partitions, one_rendering_per_step
+from driving_scenes.modeling.evaluate import Predictions, cached_predictions
 from driving_scenes.modeling.train import fit
 
 
@@ -61,9 +64,19 @@ def train_recipe(
 
 
 def train_variant(
-    name: str, train: pd.DataFrame, val: pd.DataFrame, signs: pd.DataFrame, heads: Path
+    name: str,
+    train: pd.DataFrame,
+    val: pd.DataFrame,
+    signs: pd.DataFrame,
+    heads: Path,
+    seed: int = RANDOM_SEED,
 ) -> Path:
-    """Stage two of the recipe with the one change `VARIANTS[name]` makes, from the same heads."""
+    """
+    Stage two of the recipe with the one change `VARIANTS[name]` makes, from the given heads.
+
+    With another seed than the default, `heads` should be the stage one of that
+    seed, and the run is named after the seed as well.
+    """
     settings = {
         "stages": FINETUNE_STAGES,
         "epochs": FINETUNE_EPOCHS,
@@ -71,9 +84,55 @@ def train_variant(
         "balance": BALANCE,
         "tasks": TASKS,
     } | VARIANTS[name]
-    return fit(
-        train, val, signs, name, start=heads, shift=HEAD_EPOCHS, seed=RANDOM_SEED, **settings
-    )
+    run = name if seed == RANDOM_SEED else f"{name}_seed{seed}"
+    return fit(train, val, signs, run, start=heads, shift=HEAD_EPOCHS, seed=seed, **settings)
+
+
+def variant_verdicts(
+    scores: pd.Series, seeds: Sequence[str], candidates: Sequence[str]
+) -> pd.DataFrame:
+    """
+    Whether each candidate replaces the recipe, by the rule fixed before the runs.
+
+    `scores` holds the validation score of every run by name. A candidate
+    replaces the recipe only when it beats the mean of the recipe's seed runs
+    by more than their range, the run-to-run noise of the recipe itself. The
+    margin and the range are given in points (hundredths of the score).
+    """
+    recipe = scores[list(seeds)]
+    mean, noise = recipe.mean(), recipe.max() - recipe.min()
+    table = pd.DataFrame({"val_score": scores[list(candidates)]})
+    table["points above the seed mean"] = 100 * (table["val_score"] - mean)
+    table["seed range in points"] = 100 * noise
+    table["replaces the recipe"] = table["val_score"] - mean > noise
+    return table
+
+
+def carried_forward(verdicts: pd.DataFrame, recipe: str) -> str:
+    """The run carried forward: the best candidate that replaces the recipe, or the recipe."""
+    winners = verdicts[verdicts["replaces the recipe"]]
+    return recipe if winners.empty else str(winners["val_score"].astype(float).idxmax())
+
+
+def train_seeds(
+    name: str,
+    train: pd.DataFrame,
+    val: pd.DataFrame,
+    signs: pd.DataFrame,
+    recipes: Mapping[int, tuple[Path, Path]],
+) -> dict[str, Path]:
+    """
+    Every seed of one configuration, by run name: the recipe's own runs, or a variant's.
+
+    `recipes` maps each seed to the two stages `train_recipe` returned for it; a
+    variant is trained from each seed's own stage one.
+    """
+    if name not in VARIANTS:
+        return {tuned.name: tuned for _, tuned in recipes.values()}
+    runs = [
+        train_variant(name, train, val, signs, heads, seed) for seed, (heads, _) in recipes.items()
+    ]
+    return {run.name: run for run in runs}
 
 
 def train_held_out(
@@ -89,3 +148,20 @@ def train_held_out(
     val = frames[frames["world"].isin(PARTITIONS["validation"])]
     _, tuned = train_recipe(train, val, signs, prefix=f"{name}_")
     return tuned, frames[frames["world"].isin(plan["test"])]
+
+
+def held_out_predictions(
+    frames: pd.DataFrame, signs: pd.DataFrame, prediction_dir: Path = PREDICTION_DIR
+) -> dict[str, Predictions]:
+    """
+    Each held-out run's predictions on one rendering per moment of the worlds it never saw.
+
+    The prediction files are named as the training queue names them, so the
+    predictions it computed are found and reused.
+    """
+    result = {}
+    for name in HELD_OUT:
+        run, held = train_held_out(name, frames, signs)
+        path = prediction_dir / f"{run.name}_test_moments.npz"
+        result[name] = cached_predictions(run, one_rendering_per_step(held), signs, path)
+    return result

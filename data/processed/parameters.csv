@@ -1,0 +1,11 @@
+part,parameters,trained in stage one,trained in stage two
+ResNet stem,9408,0,0
+ResNet layer1,212992,0,0
+ResNet layer2,1212416,0,1212416
+ResNet layer3,7077888,0,7077888
+ResNet layer4,14942208,0,14942208
+feature pyramid,3344384,0,3344384
+proposal network,602930,602930,602930
+box head,13905930,13905930,13905930
+road head,1624833,1624833,1624833
+total,42932989,16133693,42710589

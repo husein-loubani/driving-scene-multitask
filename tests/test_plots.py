@@ -120,6 +120,16 @@ def test_every_chart_labels_its_axes(tmp_path):
         {"threshold": [0.1, 0.5], "precision": [0.5, 0.8], "recall": [0.9, 0.6], "f1": [0.64, 0.69]}
     )
     sizes = pd.DataFrame({"recall": [0.4, 0.8], "ap": [0.2, 0.5]}, index=["small", "large"])
+    reliability = pd.DataFrame(
+        {"detections": [40, 10], "mean confidence": [0.2, 0.9], "hit rate": [0.1, 0.95]}
+    )
+    calls = pd.DataFrame(
+        {
+            "share called road": [0.9, 0.05, 0.01],
+            "share of false road": [np.nan, 0.8, 0.2],
+        },
+        index=pd.Index(["road", "terrain", "sky"], name="true class"),
+    )
     figures = {
         "shares": plots.plot_class_shares(shares),
         "shapes": plots.plot_sign_shapes(signs),
@@ -137,6 +147,8 @@ def test_every_chart_labels_its_axes(tmp_path):
         "groups": plots.plot_group_scores(groups, "Rendering"),
         "sweep": plots.plot_threshold_sweep(sweep, 0.5),
         "sizes": plots.plot_size_scores(sizes),
+        "reliability": plots.plot_reliability(reliability, 0.05),
+        "calls": plots.plot_road_calls({"validation": calls, "test": calls}),
         "heat": plots.plot_heatmaps(
             {"map": (np.random.default_rng(0).random((4, 8)), "Share of frames")}
         ),

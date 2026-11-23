@@ -31,11 +31,41 @@ from driving_scenes.config import (
     MASK_HEAD_SIZE,
     NEIGHBOR_GAP,
     ROAD_HEAD_STRIDE,
+    TALL_ASPECT,
     VARIATIONS,
 )
 from driving_scenes.dataset import BOX_COLUMNS, ROAD_INDEX, load_labels
 
 SIZE_NAMES = ("small", "medium", "large")
+
+
+def group_summary(frames: pd.DataFrame, by: str) -> pd.DataFrame:
+    """
+    Per group of frames, such as a world or a partition: its size and what it shows.
+
+    A moment is one step of one world's video, shown in up to ten renderings.
+    The road share counts every pixel of the frames, unlabeled ones included.
+    """
+    table = frames.assign(
+        moment=frames["world"] + "_" + frames["step"].astype(str),
+        pixels=frames["width"] * frames["height"],
+        has_sign=frames["signs"] > 0,
+    )
+    grouped = table.groupby(by)
+    summary = pd.DataFrame(
+        {
+            "moments": grouped["moment"].nunique(),
+            "frames": grouped.size(),
+            "renderings": grouped["variation"].nunique(),
+            "signs per frame": grouped["signs"].mean(),
+            "frames with a sign": grouped["has_sign"].mean(),
+            "road share": grouped["pixels_road"].sum() / grouped["pixels"].sum(),
+        }
+    )
+    summary.insert(1, "share of moments", summary["moments"] / summary["moments"].sum())
+    if by != "world":
+        summary.insert(0, "worlds", grouped["world"].unique().map(lambda w: ", ".join(sorted(w))))
+    return summary
 
 
 def class_shares(frames: pd.DataFrame, by: str = "world") -> pd.DataFrame:
@@ -76,6 +106,70 @@ def describe_signs(signs: pd.DataFrame, frames: pd.DataFrame) -> pd.DataFrame:
         | (table["y_max"] >= table["frame_height"] - BORDER_MARGIN)
     )
     return table.drop(columns=["frame_width", "frame_height"])
+
+
+def sign_summary(described: pd.DataFrame) -> pd.Series:
+    """
+    The sign regions in a few numbers: size, elongation, fill, frame edges and fragments.
+
+    `described` is the output of `describe_signs` with a `fragment` column from
+    `has_close_neighbor`.
+    """
+    sizes = described["size"].value_counts(normalize=True)
+    return pd.Series(
+        {
+            "regions": len(described),
+            "median width (px)": described["width"].median(),
+            "median height (px)": described["height"].median(),
+            "median height over width": described["aspect"].median(),
+            f"share more than {TALL_ASPECT} times taller than wide": (
+                described["aspect"] > TALL_ASPECT
+            ).mean(),
+            "median share of the box the region fills": described["fill"].median(),
+            **{f"share {size} (COCO)": sizes.get(size, 0.0) for size in SIZE_NAMES},
+            "share cut off by the frame edge": described["at_border"].mean(),
+            f"share with another region within {NEIGHBOR_GAP} px": described["fragment"].mean(),
+            "smallest region (pixels)": described["pixels"].min(),
+        }
+    )
+
+
+def sign_examples(described: pd.DataFrame, seed: int) -> pd.DataFrame:
+    """
+    One frame for each kind of sign region the cleaning has to decide about.
+
+    Returns the frame ids with the reason each was chosen: a sign split into
+    fragments, a sign cut by the frame edge, the smallest region, and the most
+    elongated one.
+    """
+    picks = {
+        "a sign split into touching regions": described[described["fragment"]].sample(
+            1, random_state=seed
+        ),
+        "a sign cut off by the frame edge": described[described["at_border"]].sample(
+            1, random_state=seed
+        ),
+        "the smallest region": described.nsmallest(1, "pixels"),
+        "the most elongated region": described.nlargest(1, "aspect"),
+    }
+    return pd.DataFrame(
+        {"frame_id": [pick["frame_id"].iloc[0] for pick in picks.values()], "reason": list(picks)}
+    )
+
+
+def world_examples(frames: pd.DataFrame, variation: str) -> pd.DataFrame:
+    """One frame per world, from the middle of its video, in the given rendering."""
+    video = frames[frames["variation"] == variation].sort_values(["world", "step"])
+    position = video.groupby("world").cumcount()
+    length = video.groupby("world")["step"].transform("size")
+    return video[position == length // 2].reset_index(drop=True)
+
+
+def rendering_examples(frames: pd.DataFrame, world: str, step: int) -> pd.DataFrame:
+    """The renderings of one moment, in the order of `VARIATIONS`."""
+    moment = frames[(frames["world"] == world) & (frames["step"] == step)]
+    rank = {name: index for index, name in enumerate(VARIATIONS)}
+    return moment.sort_values("variation", key=lambda names: names.map(rank)).reset_index(drop=True)
 
 
 def box_gap(first: np.ndarray, second: np.ndarray) -> np.ndarray:

@@ -243,8 +243,8 @@ def audit_summary(frames: pd.DataFrame, signs: pd.DataFrame) -> pd.Series:
             ),
             "pixels claimed by two regions": int(frames["overlapping_pixels"].sum()),
             "frames with every pixel labeled": int((frames["unlabeled_pixels"] == 0).sum()),
-            "share of pixels without a label": float(
-                frames["unlabeled_pixels"].sum() / pixels.sum()
+            "percent of pixels without a label": float(
+                100 * frames["unlabeled_pixels"].sum() / pixels.sum()
             ),
             "labeled pixels accounted for": bool(
                 (frames[labeled].sum(axis=1) + frames["unlabeled_pixels"] == pixels).all()

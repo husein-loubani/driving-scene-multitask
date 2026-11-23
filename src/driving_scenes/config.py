@@ -151,6 +151,8 @@ PARTITIONS = {"train": ("0002", "0006", "0020"), "validation": ("0018",), "test"
 COCO_SIZE_EDGES = (32**2, 96**2)
 # A box this close to the frame's edge is counted as cut off by it.
 BORDER_MARGIN = 1
+# A sign region this many times taller than wide is counted as very elongated.
+TALL_ASPECT = 10
 # Sign regions separated by at most this many pixels are counted as neighbors,
 # the trace of one sign split by something thin in front of it.
 NEIGHBOR_GAP = 3
@@ -206,6 +208,8 @@ VARIANTS = {
     "frozen": {"stages": 0},
     "lr_0.0025": {"lr": 0.0025},
     "lr_0.01": {"lr": 0.01},
+    # Added once 0.01 won at the top of the first bracket, so the winner is bracketed.
+    "lr_0.02": {"lr": 0.02},
 }
 # The recipe retrained with other worlds held out, so every world except the
 # validation world is scored by a network that never saw it. Validation stays
@@ -228,6 +232,8 @@ TIMING_FRAMES = 110
 TIMING_WARMUP = 10
 # A detection counts as a hit when it overlaps a sign by at least this IoU.
 MATCH_IOU = 0.5
+# Confidence bins of equal width for the reliability of the detection scores.
+CALIBRATION_BINS = 10
 
 # --- exploration samples -------------------------------------------------------
 
@@ -240,6 +246,21 @@ RENDERING_STEPS = 40
 CEILING_FRAMES = 600
 # A sign box overlapping a box of another frame by this IoU counts as the same sign.
 SAME_SIGN_IOU = 0.5
+
+# --- notebook ------------------------------------------------------------------
+
+# Stage-two runs that could replace the recipe, and the baselines that cannot.
+CANDIDATE_VARIANTS = ("sum", "lr_0.0025", "lr_0.01", "lr_0.02")
+BASELINE_VARIANTS = ("signs_only", "road_only", "frozen")
+COCO_ANCHOR_PREFIX = "coco_anchors_"
+ROAD_CALL_DIR = INTERIM_DIR / "road_calls"
+# Frames shown at each end of a ranking, and the digits tables are shown with.
+EXTREME_COUNT = 3
+# Frames shown at one end of a ranking lie this many steps apart, so they show different moments.
+EXTREME_STEP_GAP = 25
+# The share of test frames, lowest combined score first, read as the worst frames.
+WORST_SHARE = 0.05
+DISPLAY_PRECISION = 3
 
 # --- figures -------------------------------------------------------------------
 

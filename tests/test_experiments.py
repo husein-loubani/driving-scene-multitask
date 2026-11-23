@@ -21,10 +21,14 @@ from driving_scenes.config import (
 )
 from driving_scenes.modeling import experiments
 from driving_scenes.modeling.experiments import (
+    carried_forward,
+    held_out_predictions,
     split_frames,
     train_held_out,
     train_recipe,
+    train_seeds,
     train_variant,
+    variant_verdicts,
 )
 
 
@@ -85,6 +89,48 @@ def test_each_variant_changes_exactly_one_setting_of_stage_two(calls):
         assert calls[-1]["start"] == Path("heads") and calls[-1]["shift"] == HEAD_EPOCHS
 
 
+def test_a_variant_with_another_seed_starts_from_that_seed_s_heads(calls):
+    train_variant("lr_0.01", frames_of(["0002"]), frames_of(["0018"]), None, Path("h43"), seed=43)
+    assert calls[-1]["name"] == "lr_0.01_seed43" and calls[-1]["seed"] == 43
+    assert calls[-1]["start"] == Path("h43") and calls[-1]["lr"] == VARIANTS["lr_0.01"]["lr"]
+    train_variant("lr_0.01", frames_of(["0002"]), frames_of(["0018"]), None, Path("h42"))
+    assert calls[-1]["name"] == "lr_0.01" and calls[-1]["seed"] == 42
+
+
+def test_every_seed_of_a_configuration_is_trained_from_its_own_heads(calls):
+    recipes = {42: (Path("h42"), Path("recipe_seed42")), 43: (Path("h43"), Path("recipe_seed43"))}
+    train, val = frames_of(["0002"]), frames_of(["0018"])
+    assert train_seeds("recipe_seed42", train, val, None, recipes) == {
+        "recipe_seed42": Path("recipe_seed42"),
+        "recipe_seed43": Path("recipe_seed43"),
+    }
+    assert not calls, "the recipe's seeds are already trained"
+    runs = train_seeds("lr_0.01", train, val, None, recipes)
+    assert list(runs) == ["lr_0.01", "lr_0.01_seed43"]
+    assert [call["start"] for call in calls] == [Path("h42"), Path("h43")]
+
+
+def test_the_best_replacing_candidate_is_carried_forward():
+    verdicts = pd.DataFrame(
+        {"val_score": [0.95, 0.97, 0.96], "replaces the recipe": [False, True, True]},
+        index=["sum", "lr_0.01", "lr_0.02"],
+    )
+    assert carried_forward(verdicts, "recipe_seed42") == "lr_0.01"
+    verdicts["replaces the recipe"] = False
+    assert carried_forward(verdicts, "recipe_seed42") == "recipe_seed42"
+
+
+def test_a_variant_replaces_the_recipe_only_beyond_the_seed_range():
+    scores = pd.Series(
+        {"seed42": 0.90, "seed43": 0.92, "seed44": 0.91, "close": 0.925, "far": 0.94, "low": 0.85}
+    )
+    table = variant_verdicts(scores, ["seed42", "seed43", "seed44"], ["close", "far", "low"])
+    # Seed mean 0.91 and range 0.02: only a score above 0.93 replaces the recipe.
+    assert table["points above the seed mean"].tolist() == pytest.approx([1.5, 3.0, -6.0])
+    assert table["seed range in points"].tolist() == pytest.approx([2.0] * 3)
+    assert table["replaces the recipe"].tolist() == [False, True, False]
+
+
 def test_a_held_out_run_trains_on_its_worlds_and_returns_the_others(calls):
     frames = frames_of(["0001", "0002", "0006", "0018", "0020"])
     for name, plan in HELD_OUT.items():
@@ -95,3 +141,29 @@ def test_a_held_out_run_trains_on_its_worlds_and_returns_the_others(calls):
         assert tuned == Path(f"{name}_recipe_seed42")
         assert not set(plan["train"]) & set(plan["test"])
         assert not set(plan["train"]) & set(PARTITIONS["validation"])
+
+
+def test_held_out_predictions_score_each_run_on_the_worlds_it_never_saw(monkeypatch, tmp_path):
+    worlds = ["0001", "0002", "0006", "0018", "0020"]
+    frames = frames_of(worlds).assign(variation="clone", step=0)
+    predicted = []
+
+    def fake_predictions(run, chosen, signs, path):
+        predicted.append((run, set(chosen["world"]), path))
+        return run
+
+    monkeypatch.setattr(
+        experiments,
+        "train_held_out",
+        lambda name, all_frames, signs: (
+            Path(f"{name}_recipe_seed42"),
+            all_frames[all_frames["world"].isin(HELD_OUT[name]["test"])],
+        ),
+    )
+    monkeypatch.setattr(experiments, "cached_predictions", fake_predictions)
+    result = held_out_predictions(frames, None, tmp_path)
+    assert list(result) == list(HELD_OUT)
+    for (run, worlds, path), (name, plan) in zip(predicted, HELD_OUT.items(), strict=True):
+        assert worlds == set(plan["test"])
+        assert path == tmp_path / f"{run.name}_test_moments.npz"
+        assert run == Path(f"{name}_recipe_seed42")

@@ -97,7 +97,7 @@ def test_the_audit_reports_the_gaps_the_archive_leaves(indexed):
     assert audit["frames"] == 12 and audit["worlds"] == 2
     assert audit["frame sizes (width x height)"] == f"{WIDTH} x {HEIGHT}"
     assert audit["frames with every pixel labeled"] == 0
-    assert audit["share of pixels without a label"] == pytest.approx(6 / (HEIGHT * WIDTH))
+    assert audit["percent of pixels without a label"] == pytest.approx(600 / (HEIGHT * WIDTH))
     assert audit["pixels claimed by two regions"] == 0
     assert audit["frames whose tags disagree with their name"] == 0
     assert audit["labeled pixels accounted for"]

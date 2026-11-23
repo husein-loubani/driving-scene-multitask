@@ -20,15 +20,21 @@ import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import DataLoader
+from torchmetrics.functional.classification import binary_calibration_error
 from torchvision.ops import box_iou
 
 from driving_scenes import cache
 from driving_scenes.config import (
     BATCH_SIZE,
+    CALIBRATION_BINS,
+    CLASSES,
+    EXTREME_STEP_GAP,
+    IGNORE_LABEL,
     LABEL_DIR,
     LOADER_WORKERS,
     MATCH_IOU,
     RAW_DIR,
+    ROAD_CLASS,
     ROAD_THRESHOLD,
     SCORE_FLOOR,
     SCORE_THRESHOLDS,
@@ -244,6 +250,22 @@ def scores_by_group(
     return pd.DataFrame(rows).T
 
 
+def compare_runs(
+    scores: dict[str, pd.DataFrame], seeds: list[str]
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    The AP50 and road IoU of every run on each frame set, and their range over the recipe's seeds.
+
+    `scores` maps a frame set's name, such as "validation" or "test", to a
+    table with one row per run and `sign_ap50` and `road_iou` columns. Both
+    results carry a two-level column index (frame set, score), as `plots.plot_runs`
+    reads it; the range has a `min` and a `max` row.
+    """
+    columns = ["sign_ap50", "road_iou"]
+    table = pd.concat({name: frame[columns] for name, frame in scores.items()}, axis=1)
+    return table, table.loc[seeds].agg(["min", "max"])
+
+
 def assign_detections(
     boxes: np.ndarray, scores: np.ndarray, truth: np.ndarray, iou: float = MATCH_IOU
 ) -> np.ndarray:
@@ -326,14 +348,74 @@ def frame_scores(
             }
         )
     table = pd.DataFrame(rows)
-    table["sign_f1"] = (
-        2 * table["found"] / (2 * table["found"] + table["missed"] + table["false_alarms"])
-    )
+    table["errors"] = table["missed"] + table["false_alarms"]
+    table["sign_f1"] = 2 * table["found"] / (2 * table["found"] + table["errors"])
     if predictions.counts is not None:
         tp, fp, _, fn = predictions.counts.T.astype(float)
         union = tp + fp + fn
         table["road_iou"] = np.divide(tp, union, out=np.ones_like(tp), where=union > 0)
+        # Frames with no sign and no false alarm have no F1, so they get no combined score.
+        table["combined"] = (table["road_iou"] + table["sign_f1"]) / 2
     return table
+
+
+def distinct_moments(ranked: pd.DataFrame, count: int, gap: int) -> pd.DataFrame:
+    """The first `count` rows whose steps lie at least `gap` apart, in the order given."""
+    chosen: list[int] = []
+    for index, step in zip(ranked.index, ranked["step"], strict=True):
+        if all(abs(step - ranked.at[other, "step"]) >= gap for other in chosen):
+            chosen.append(index)
+            if len(chosen) == count:
+                break
+    return ranked.loc[chosen]
+
+
+def extreme_frames(
+    table: pd.DataFrame, column: str, count: int, gap: int = EXTREME_STEP_GAP
+) -> pd.DataFrame:
+    """
+    The `count` best frames by one score, best first, then the `count` worst, worst first.
+
+    Frames without the score are left out. Among equal scores, fewer sign
+    errors rank higher, so the worst of a tie is the frame with the most errors.
+    Neighboring frames and the renderings of one moment are near-copies, so the
+    frames chosen at each end lie at least `gap` steps apart.
+    """
+    ranked = table.dropna(subset=[column]).sort_values(
+        [column, "errors", "frame_id"], ascending=[False, True, True]
+    )
+    best = distinct_moments(ranked, count, gap).assign(rank="best")
+    worst = distinct_moments(ranked.iloc[::-1], count, gap).assign(rank="worst")
+    return pd.concat([best, worst])
+
+
+def frame_titles(chosen: pd.DataFrame) -> list[str]:
+    """A title per frame: its rendering and step, its road IoU and how its signs fared."""
+    return [
+        f"{row.variation}, step {row.step}: road IoU {row.road_iou:.2f}, "
+        f"{row.found} of {row.signs} signs found, "
+        f"{row.false_alarms} false alarm{'' if row.false_alarms == 1 else 's'}"
+        for row in chosen.itertuples()
+    ]
+
+
+def detection_hits(
+    predictions: Predictions, signs: pd.DataFrame, iou: float = MATCH_IOU
+) -> np.ndarray:
+    """
+    Whether each stored detection hits a sign, with every stored detection matched.
+
+    A detection's hit does not depend on less confident detections, so the
+    hits found here hold at any higher confidence threshold as well.
+    """
+    truth = truth_by_frame(predictions.frame_ids, signs)
+    hits = np.zeros(len(predictions.scores), dtype=bool)
+    for row in range(len(predictions.frame_ids)):
+        mine = np.flatnonzero(predictions.box_frame == row)
+        hits[mine] = match_detections(
+            predictions.boxes[mine], predictions.scores[mine], truth[row]["boxes"].numpy(), iou
+        )
+    return hits
 
 
 def threshold_sweep(
@@ -343,16 +425,8 @@ def threshold_sweep(
     iou: float = MATCH_IOU,
 ) -> pd.DataFrame:
     """Precision, recall and F1 over all frames at each confidence threshold."""
-    truth = truth_by_frame(predictions.frame_ids, signs)
-    total_signs = sum(len(item["boxes"]) for item in truth)
-    # Matching at the lowest threshold first: a detection's hit does not depend
-    # on less confident detections, so raising the threshold only removes rows.
-    hits = np.zeros(len(predictions.scores), dtype=bool)
-    for row in range(len(predictions.frame_ids)):
-        mine = np.flatnonzero(predictions.box_frame == row)
-        hits[mine] = match_detections(
-            predictions.boxes[mine], predictions.scores[mine], truth[row]["boxes"].numpy(), iou
-        )
+    total_signs = int(signs["frame_id"].isin(set(predictions.frame_ids)).sum())
+    hits = detection_hits(predictions, signs, iou)
     rows = []
     for threshold in thresholds:
         kept = predictions.scores >= threshold
@@ -363,6 +437,149 @@ def threshold_sweep(
         f1 = 2 * precision * recall / max(precision + recall, 1e-12)
         rows.append({"threshold": threshold, "precision": precision, "recall": recall, "f1": f1})
     return pd.DataFrame(rows)
+
+
+def detection_reliability(
+    predictions: Predictions,
+    signs: pd.DataFrame,
+    bins: int = CALIBRATION_BINS,
+    iou: float = MATCH_IOU,
+) -> tuple[pd.DataFrame, float]:
+    """
+    How far a detection's confidence can be read as the chance that it is a sign.
+
+    Returns, per confidence bin, the detections, their mean confidence and the
+    share of them that hit a sign, plus the expected calibration error over
+    all detections (torchmetrics, the gap between confidence and hit rate
+    averaged over the bins, weighted by their detections).
+    """
+    hits = detection_hits(predictions, signs, iou)
+    table = pd.DataFrame(
+        {
+            "bin": pd.cut(predictions.scores, np.linspace(0, 1, bins + 1), include_lowest=True),
+            "confidence": predictions.scores,
+            "hit": hits,
+        }
+    )
+    grouped = table.groupby("bin", observed=True)
+    reliability = pd.DataFrame(
+        {
+            "detections": grouped.size(),
+            "mean confidence": grouped["confidence"].mean(),
+            "hit rate": grouped["hit"].mean(),
+        }
+    )
+    error = binary_calibration_error(
+        torch.from_numpy(predictions.scores.astype(np.float32)),
+        torch.from_numpy(hits.astype(np.int64)),
+        n_bins=bins,
+        norm="l1",
+    )
+    return reliability, float(error)
+
+
+def recall_by(described: pd.DataFrame, found: pd.Series, column: str) -> pd.DataFrame:
+    """
+    The signs, the signs found and the share found, per value of one column of `describe_signs`.
+
+    `found` is indexed like the described signs, as `sign_outcomes` returns it.
+    """
+    table = described.loc[found.index].assign(found=found)
+    grouped = table.groupby(column, observed=False)["found"]
+    return pd.DataFrame({"signs": grouped.size(), "found": grouped.sum(), "recall": grouped.mean()})
+
+
+def size_scores(
+    described: pd.DataFrame, found: pd.Series, scores: dict[str, float]
+) -> pd.DataFrame:
+    """Per COCO size class: the signs, the share found at a threshold, and the class's COCO AP."""
+    table = recall_by(described, found, "size")
+    table["ap"] = [scores[f"sign_ap_{size}"] for size in table.index]
+    return table
+
+
+def fixed_mask_counts(
+    mask: np.ndarray, frames: pd.DataFrame, label_dir: Path = LABEL_DIR
+) -> np.ndarray:
+    """
+    Road counts per frame (tp, fp, tn, fn) for one fixed mask called road in every frame.
+
+    The baseline a road head has to beat: a mask that knows where road usually
+    is and looks at nothing.
+    """
+    called = torch.from_numpy(mask.astype(np.float32))[None]
+    counts = [
+        road_counts(called, torch.from_numpy(road_target(load_labels(frame_id, label_dir)))[None])
+        for frame_id in frames["frame_id"]
+    ]
+    return torch.cat(counts).numpy()
+
+
+@torch.no_grad()
+def road_calls_by_class(
+    model: MultiTaskRCNN,
+    frames: pd.DataFrame,
+    signs: pd.DataFrame,
+    raw_dir: Path = RAW_DIR,
+    label_dir: Path = LABEL_DIR,
+    workers: int = LOADER_WORKERS,
+) -> pd.DataFrame:
+    """
+    Every labeled class with its pixels in the frames and how many of them the network calls road.
+
+    The road row counts the road found. Every other row counts false road by
+    what the pixels really are, and its `share of false road` says how much of
+    all false road that class makes up.
+    """
+    target = device()
+    model = model.to(target).eval()
+    loader = DataLoader(
+        FrameDataset(frames, signs, raw_dir, label_dir),
+        batch_size=BATCH_SIZE,
+        num_workers=workers,
+        collate_fn=collate,
+    )
+    frame_ids = frames["frame_id"].tolist()
+    totals = torch.zeros(IGNORE_LABEL + 1, dtype=torch.long)
+    called = torch.zeros(IGNORE_LABEL + 1, dtype=torch.long)
+    for images, _, _, rows in loader:
+        _, probability = model.predict([image.to(target) for image in images])
+        for road, row in zip((probability >= ROAD_THRESHOLD).cpu(), rows.tolist(), strict=True):
+            labels = torch.from_numpy(load_labels(frame_ids[row], label_dir).astype(np.int64))
+            totals += torch.bincount(labels.ravel(), minlength=IGNORE_LABEL + 1)
+            called += torch.bincount(labels[road], minlength=IGNORE_LABEL + 1)
+    table = pd.DataFrame(
+        {"pixels": totals[: len(CLASSES)].numpy(), "called road": called[: len(CLASSES)].numpy()},
+        index=pd.Index(CLASSES, name="true class"),
+    )
+    table["share called road"] = table["called road"] / table["pixels"].where(table["pixels"] > 0)
+    false_road = table["called road"].drop(ROAD_CLASS)
+    table["share of false road"] = false_road / max(false_road.sum(), 1)
+    return table
+
+
+def cached_road_calls(
+    run: Path,
+    frames: pd.DataFrame,
+    signs: pd.DataFrame,
+    path: Path,
+    raw_dir: Path = RAW_DIR,
+    label_dir: Path = LABEL_DIR,
+    workers: int = LOADER_WORKERS,
+) -> pd.DataFrame:
+    """`road_calls_by_class` for a finished run, computed once and reused while nothing changed."""
+    key = cache.fingerprint(
+        "road calls", cache.read_stamp(run), frames["frame_id"].to_numpy(), ROAD_THRESHOLD
+    )
+    if cache.is_current(path, key):
+        return pd.read_csv(path, index_col="true class")
+    model = load_model(run)
+    table = road_calls_by_class(model, frames, signs, raw_dir, label_dir, workers)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    table.to_csv(path)
+    cache.record(path, key)
+    del model
+    return table
 
 
 @torch.no_grad()
